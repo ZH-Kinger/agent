@@ -1,0 +1,79 @@
+name: Claude PR Review
+description: Run Claude AI code review on a pull request diff and post results as a comment
+
+inputs:
+  github-token:
+    description: GitHub token for posting PR comments
+    required: true
+  anthropic-api-key:
+    description: Anthropic API key for Claude
+    required: true
+  model:
+    description: Claude model to use
+    required: false
+    default: claude-sonnet-4-5
+  max-diff-lines:
+    description: Truncate diff to this many lines to control cost
+    required: false
+    default: '800'
+  language:
+    description: Review language (zh / en)
+    required: false
+    default: zh
+
+outputs:
+  comment-url:
+    description: URL of the posted review comment
+    value: ${{ steps.post-comment.outputs.comment-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: pip install anthropic -q
+
+    - name: Fetch PR diff
+      id: diff
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        MAX_LINES: ${{ inputs.max-diff-lines }}
+      run: |
+        gh pr diff ${{ github.event.pull_request.number }} \
+          --repo ${{ github.repository }} | head -n "$MAX_LINES" > /tmp/pr.diff
+        echo "diff_size=$(wc -l < /tmp/pr.diff)" >> $GITHUB_OUTPUT
+
+    - name: Run Claude review
+      id: review
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        MODEL: ${{ inputs.model }}
+        LANGUAGE: ${{ inputs.language }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+      run: |
+        python3 ${{ github.action_path }}/review.py \
+          --diff /tmp/pr.diff \
+          --title "$PR_TITLE" \
+          --body "$PR_BODY" \
+          --model "$MODEL" \
+          --language "$LANGUAGE" \
+          > /tmp/review.md
+
+    - name: Post review comment
+      id: post-comment
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        comment_url=$(gh pr comment ${{ github.event.pull_request.number }} \
+          --repo ${{ github.repository }} \
+          --body-file /tmp/review.md \
+          --edit-last 2>/dev/null \
+          || gh pr comment ${{ github.event.pull_request.number }} \
+          --repo ${{ github.repository }} \
+          --body-file /tmp/review.md)
+        echo "comment-url=$comment_url" >> $GITHUB_OUTPUT
+        echo "✅ Review posted: $comment_url"

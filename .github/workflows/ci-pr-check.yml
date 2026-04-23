@@ -1,0 +1,25 @@
+name: CI - PR Checks
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+
+jobs:
+  test-scripts:
+    name: Run script unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: python3 -m pytest scripts/tests/ -v
+
+      - name: Validate workflow YAML syntax
+        run: |
+          for f in .github/workflows/*.yml; do
+            python3 -c "import yaml, sys; yaml.safe_load(open('$f'))" \
+              && echo "✅ $f" || { echo "❌ $f"; exit 1; }
+          done

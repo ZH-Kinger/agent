@@ -65,10 +65,10 @@ jobs:
           repositories: wuji-docs-center
 
       - name: Parse repositories input
+        env:
+          REPOS_INPUT: ${{ inputs.repositories }}
         run: |
-          cat <<'EOF' | python3 scripts/parse-repos.py > repos.json
-          ${{ inputs.repositories }}
-          EOF
+          echo "$REPOS_INPUT" | python3 scripts/release/parse-repos.py > repos.json
           echo "✅ 解析成功:"
           cat repos.json | jq -r '.[] | "  - \(.repo) v\(.version)"'
 
@@ -76,7 +76,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token-source.outputs.token }}
         run: |
-          cat repos.json | python3 scripts/fetch-changelogs.py > changelogs.json
+          cat repos.json | python3 scripts/docs/fetch-changelogs.py > changelogs.json
           echo "✅ CHANGELOG 抓取完成"
           echo ""
           echo "=== 抓取结果 ==="
@@ -93,7 +93,7 @@ jobs:
           if [ -n "$RELEASE_DATE" ]; then
             date_arg="--release-date $RELEASE_DATE"
           fi
-          cat changelogs.json | python3 scripts/generate-release-template.py \
+          cat changelogs.json | python3 scripts/docs/generate-release-template.py \
             --output-dir /tmp \
             --dry-run \
             $date_arg
@@ -122,7 +122,7 @@ jobs:
           echo "branch_name=chore/update-release-notes-${display_date}" >> $GITHUB_ENV
           echo "display_date=$display_date" >> $GITHUB_ENV
 
-          cat changelogs.json | python3 scripts/generate-release-template.py \
+          cat changelogs.json | python3 scripts/docs/generate-release-template.py \
             --output-dir docs-repo \
             $date_arg
 

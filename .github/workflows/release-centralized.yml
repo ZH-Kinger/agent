@@ -34,13 +34,12 @@ jobs:
 
       - name: Parse repositories input
         id: parse
+        env:
+          REPOS_INPUT: ${{ inputs.repositories }}
         run: |
           echo "解析仓库配置..."
-          cat <<'EOF' | python3 scripts/parse-repos.py > repos.json
-          ${{ inputs.repositories }}
-          EOF
+          echo "$REPOS_INPUT" | python3 scripts/release/parse-repos.py > repos.json
 
-          # 读取并输出
           matrix=$(cat repos.json | jq -c '{include: .}')
           echo "matrix=$matrix" >> $GITHUB_OUTPUT
 
@@ -100,7 +99,7 @@ jobs:
             echo "📅 使用当天日期"
           fi
 
-          python3 ../.github-repo/scripts/update-changelog.py \
+          python3 ../.github-repo/scripts/release/update-changelog.py \
             --file "$CHANGELOG_PATH" \
             --version "${{ matrix.version }}" \
             --repo "${{ matrix.repo }}" \
@@ -127,7 +126,7 @@ jobs:
           # 公开 CHANGELOG 链接指向去掉 -dev/-private 后缀的公开仓库
           PUBLIC_REPO=$(echo "$REPO_NAME" | sed -E 's/-(dev|private)$//')
 
-          python3 ../.github-repo/scripts/update-changelog.py \
+          python3 ../.github-repo/scripts/release/update-changelog.py \
             --file "$PUBLIC_CHANGELOG_PATH" \
             --version "${{ matrix.version }}" \
             --repo "$PUBLIC_REPO" \
@@ -142,7 +141,7 @@ jobs:
           if [ -f ".release.yml" ]; then
             echo "📦 发现 .release.yml，更新版本号文件..."
             pip install pyyaml -q
-            python3 ../.github-repo/scripts/update-versions.py \
+            python3 ../.github-repo/scripts/release/update-versions.py \
               --config .release.yml \
               --version "$VERSION"
           else
@@ -250,7 +249,7 @@ jobs:
             echo ""
             echo "📦 版本号文件更新预览:"
             pip install pyyaml -q 2>/dev/null
-            python3 ../.github-repo/scripts/update-versions.py \
+            python3 ../.github-repo/scripts/release/update-versions.py \
               --config .release.yml \
               --version "$VERSION" \
               --dry-run
