@@ -10,7 +10,7 @@ jobs:
   convention-check:
     name: PR Convention Check
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
+    if: github.event.pull_request.draft != true
 
     steps:
       - name: Check PR title (Conventional Commits)
@@ -40,7 +40,7 @@ jobs:
   ai-review:
     name: AI Code Review
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
+    if: github.event.pull_request.draft != true
     permissions:
       pull-requests: write
       contents: read
