@@ -1,0 +1,62 @@
+name: CI - PR Pipeline (Review + Jira + Feishu)
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  pipeline:
+    name: PR Pipeline
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Call PR Pipeline Server
+        id: pipeline
+        env:
+          REVIEW_TOKEN: ${{ secrets.REVIEW_TOKEN }}
+          REVIEW_SERVER_URL: ${{ secrets.REVIEW_SERVER_URL }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          REPO="${{ github.event.pull_request.head.repo.name }}"
+          TITLE="${{ github.event.pull_request.title }}"
+          BODY=$(echo '${{ github.event.pull_request.body }}' | head -c 2000)
+          ORG="${{ github.repository_owner }}"
+
+          RESPONSE=$(curl -sf \
+            -X POST "${REVIEW_SERVER_URL}/pr-pipeline" \
+            -H "Authorization: Bearer ${REVIEW_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"repo\": \"${REPO}\",
+              \"pr_number\": ${PR},
+              \"title\": $(echo "$TITLE" | jq -Rs .),
+              \"body\": $(echo "$BODY" | jq -Rs .),
+              \"org\": \"${ORG}\",
+              \"language\": \"zh\"
+            }")
+
+          # 提取 review 文本
+          echo "$RESPONSE" | jq -r '.review' > /tmp/review.md
+
+          # 输出日志
+          echo "=== Pipeline Steps ==="
+          echo "$RESPONSE" | jq -r '.steps[]'
+          echo "=== Jira ==="
+          echo "$RESPONSE" | jq -r '.jira_id // "none"'
+
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          gh pr comment $PR \
+            --repo ${{ github.repository }} \
+            --body-file /tmp/review.md \
+            --edit-last 2>/dev/null \
+          || gh pr comment $PR \
+            --repo ${{ github.repository }} \
+            --body-file /tmp/review.md

@@ -1,0 +1,104 @@
+name: CI - PR Pipeline
+
+# 所有 PR 自动触发：规范检查 + AI Review（通过云服务器）
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  # ── Job 1: PR 规范检查（零成本，不调 API）──────────────
+  convention-check:
+    name: PR Convention Check
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+
+    steps:
+      - name: Check PR title (Conventional Commits)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if echo "$PR_TITLE" | grep -qiE '^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\(.+\))?!?:'; then
+            echo "✅ PR 标题格式正确"
+          else
+            echo "❌ PR 标题不符合 Conventional Commits 规范"
+            echo "期望格式: type(scope): description"
+            echo "示例: feat(detection): add grasp pose estimation module"
+            exit 1
+          fi
+
+      - name: Check work item reference
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if echo "$PR_BODY" | grep -qiE '(Resolve[sd]?\s+[mf]-[0-9]+|[A-Z]+-[0-9]+)'; then
+            echo "✅ 已关联工作项"
+          else
+            echo "⚠️ 建议在 PR 描述中添加 Resolve m-xxx 或 Resolve f-xxx"
+          fi
+
+  # ── Job 2: AI Review（调用云服务器）─────────────────────
+  ai-review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Call Review Server
+        id: review
+        env:
+          REVIEW_TOKEN: ${{ secrets.REVIEW_TOKEN }}
+          REVIEW_SERVER_URL: ${{ secrets.REVIEW_SERVER_URL }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          REPO="${{ github.event.pull_request.head.repo.name }}"
+          TITLE="${{ github.event.pull_request.title }}"
+          BODY=$(gh pr view $PR --repo ${{ github.repository }} --json body -q '.body' 2>/dev/null || echo "")
+          ORG="${{ github.repository_owner }}"
+
+          # 调用云服务器 /pr-pipeline 端点
+          HTTP_CODE=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X POST "${REVIEW_SERVER_URL}/pr-pipeline" \
+            -H "Authorization: Bearer ${REVIEW_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"repo\": \"${REPO}\",
+              \"pr_number\": ${PR},
+              \"title\": $(echo "$TITLE" | jq -Rs .),
+              \"body\": $(echo "$BODY" | jq -Rs .),
+              \"org\": \"${ORG}\",
+              \"language\": \"zh\"
+            }")
+
+          if [ "$HTTP_CODE" -eq 200 ]; then
+            echo "✅ Review 服务器返回成功"
+            cat /tmp/response.json | jq -r '.review // empty' > /tmp/review.md
+            # 打印执行步骤
+            echo "=== Pipeline Steps ==="
+            cat /tmp/response.json | jq -r '.steps[]? // empty'
+          else
+            echo "❌ Review 服务器返回 HTTP $HTTP_CODE"
+            cat /tmp/response.json
+            echo "## ⚠️ AI Review 暂不可用" > /tmp/review.md
+            echo "" >> /tmp/review.md
+            echo "Review 服务器返回错误 (HTTP $HTTP_CODE)，请检查服务器状态。" >> /tmp/review.md
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -s /tmp/review.md ]; then
+            PR=${{ github.event.pull_request.number }}
+            gh pr comment $PR \
+              --repo ${{ github.repository }} \
+              --body-file /tmp/review.md \
+              --edit-last 2>/dev/null \
+            || gh pr comment $PR \
+              --repo ${{ github.repository }} \
+              --body-file /tmp/review.md
+          fi

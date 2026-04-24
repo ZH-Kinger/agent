@@ -211,6 +211,8 @@ def _run_http():
     from starlette.routing import Route
     from mcp.server.sse import SseServerTransport
     from tools.review import pr_review
+    from tools.jira import create_jira_issue, extract_jira_id_from_text
+    from tools.feishu import send_review_card
     import uvicorn
 
     port = int(os.environ.get("MCP_PORT", "8080"))
@@ -270,14 +272,117 @@ def _run_http():
 
         return PlainTextResponse(review_text)
 
+    async def handle_pipeline(request: Request):
+        """
+        /pr-pipeline — 一站式 PR 处理：
+        1. 拉 diff
+        2. 自动创建 Jira 工单
+        3. AI Review
+        4. 评论到 PR
+        5. 飞书通知
+        """
+        import re as _re
+
+        # 鉴权
+        auth = request.headers.get("authorization", "")
+        if review_token and auth != f"Bearer {review_token}":
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+        repo = data.get("repo", "")
+        pr_number = data.get("pr_number") or data.get("pr")
+        title = data.get("title", "")
+        body = data.get("body", "")
+        org = data.get("org", os.environ.get("GITHUB_ORG", ""))
+        pr_url = f"https://github.com/{org}/{repo}/pull/{pr_number}"
+
+        if not repo or not pr_number:
+            return JSONResponse({"error": "repo and pr_number are required"}, status_code=400)
+
+        result_log = {"steps": []}
+
+        # Step 1: 自动创建 Jira 工单（如果 PR 描述中没有已关联的 Jira ID）
+        jira_id = extract_jira_id_from_text(body) or extract_jira_id_from_text(title)
+        jira_url = ""
+        if not jira_id:
+            jira_result = create_jira_issue(
+                title=title, body=body, pr_url=pr_url, repo=repo
+            )
+            if jira_result["ok"]:
+                jira_id = jira_result["issue_id"]
+                jira_url = jira_result.get("issue_url", "")
+                result_log["steps"].append(f"✅ Jira 工单已创建: {jira_id}")
+            else:
+                result_log["steps"].append(f"⚠️ Jira 创建失败: {jira_result['error']}")
+        else:
+            result_log["steps"].append(f"ℹ️ 已关联 Jira: {jira_id}")
+
+        # Step 2: AI Review
+        review_result = pr_review(
+            repo=repo,
+            pr_number=int(pr_number),
+            title=title,
+            body=body,
+            language=data.get("language", "zh"),
+        )
+
+        if not review_result["ok"]:
+            return JSONResponse({"error": review_result["error"]}, status_code=500)
+
+        review_text = review_result["review"]
+        has_blocker = bool(_re.search(r"\|\s*Blocker\s*\|", review_text, _re.MULTILINE))
+        result_log["steps"].append("✅ AI Review 完成")
+
+        # Step 3: 拼接最终评论（包含 Jira 链接）
+        comment_parts = []
+        if jira_id:
+            jira_link = f"[{jira_id}]({jira_url})" if jira_url else jira_id
+            comment_parts.append(f"> 📌 Jira 工单: {jira_link}")
+        comment_parts.append(review_text)
+        final_comment = "\n\n".join(comment_parts)
+
+        # Step 4: 飞书通知
+        # 提取 review 摘要（取“整体结论”或“总体评价”部分）
+        summary_match = _re.search(r"###\s*(整体结论|总体评价|Summary)\s*\n(.+?)(?=\n###|$)", review_text, _re.DOTALL)
+        review_summary = summary_match.group(2).strip() if summary_match else review_text[:300]
+
+        feishu_result = send_review_card(
+            pr_title=title,
+            pr_url=pr_url,
+            repo=repo,
+            review_summary=review_summary,
+            jira_issue_id=jira_id,
+            jira_issue_url=jira_url,
+            has_blocker=has_blocker,
+        )
+        if feishu_result["ok"]:
+            result_log["steps"].append("✅ 飞书通知已发送")
+        else:
+            result_log["steps"].append(f"⚠️ 飞书通知失败: {feishu_result['error']}")
+
+        # 返回结果（GitHub Actions 用 review 文本贴评论）
+        return JSONResponse({
+            "review": final_comment,
+            "jira_id": jira_id,
+            "jira_url": jira_url,
+            "has_blocker": has_blocker,
+            "steps": result_log["steps"],
+        })
+
     app = Starlette(routes=[
         Route("/mcp/sse", endpoint=handle_sse),
         Route("/mcp/messages", endpoint=sse.handle_post_message, methods=["POST"]),
         Route("/review", endpoint=handle_review, methods=["POST"]),
+        Route("/pr-pipeline", endpoint=handle_pipeline, methods=["POST"]),
         Route("/health", endpoint=lambda _: PlainTextResponse("ok")),
     ])
     print(f"🚀 wuji-release MCP HTTP Server → http://0.0.0.0:{port}/mcp/sse")
     print(f"🔍 PR Review endpoint → http://0.0.0.0:{port}/review")
+    print(f"📦 PR Pipeline endpoint → http://0.0.0.0:{port}/pr-pipeline")
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 

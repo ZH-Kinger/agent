@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  wuji-server:
+    build:
+      context: ..
+      dockerfile: server-side/Dockerfile
+    container_name: wuji-review-server
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

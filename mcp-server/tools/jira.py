@@ -1,11 +1,11 @@
-"""Tool: jira integration — 拉取需求详情、验收标准，回写 Review 结论（支持单机缓存）"""
+"""Tool: jira integration — 拉取需求详情、自动创建工单、回写 Review 结论（支持单机缓存）"""
 import os
+import re
 import time
 import hashlib
-from functools import lru_cache
 from config import (
-    JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN,
-    JIRA_ENABLED, JIRA_CACHE_TTL
+    JIRA_URL, JIRA_PAT, JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN,
+    JIRA_ENABLED, JIRA_CACHE_TTL, JIRA_PROJECT_KEY, JIRA_ISSUE_TYPE
 )
 import httpx
 
@@ -30,9 +30,11 @@ def _invalidate_cache():
 # ── 客户端 ───────────────────────────────────────────────────────────────────
 
 def _get_auth_header():
-    """Basic: base64<{email>:API {token}>"""
+    """根据配置选择认证方式：PAT (Bearer) 或 Basic (email:token)"""
+    if JIRA_PAT:
+        return f"Bearer {JIRA_PAT}"
     import base64
-    text = f"{JIRA_EMAIL}:API {JIRA_API_TOKEN}"
+    text = f"{JIRA_EMAIL}:{JIRA_API_TOKEN}"
     return f"Basic {base64.b64encode(text.encode()).decode()}"
 
 
@@ -56,9 +58,8 @@ def fetch_jira_issue(issue_id: str, force_refresh: bool = False) -> dict:
     if not force_refresh:
         key = _cache_key(issue_id)
         if key in jira_cache:
-            # 回存``"{"ok": True, "data": cached, "from_cache": True}
-        cached = jira_cache[key]
-        return {"ok": True, "data": cached, "from_cache": True}
+            cached = jira_cache[key]
+            return {"ok": True, "data": cached, "from_cache": True}
 
     headers = {
         "Authorization": _get_auth_header(),
@@ -140,6 +141,63 @@ def add_jira_comment(issue_id: str, body: str) -> dict:
 
 def extract_jira_id_from_text(text: str) -> str:
     """正则 [A-Z]+-\d+（如 JIRA-123, PROJ-456）"""
-    import re
     match = re.search(r"\b([A-Z]+-[A-Z0-9-]*\d+)\b", text)
     return match.group(1) if match else ""
+
+
+def create_jira_issue(title: str, body: str, pr_url: str, repo: str = "") -> dict:
+    """
+    从 PR 信息自动创建 Jira 工单。
+
+    PR 标题 feat → Story，fix → Bug，其余 → Task。
+
+    Args:
+        title: PR 标题（如 feat(detection): add grasp module）
+        body: PR 描述
+        pr_url: PR 链接
+        repo: 仓库名
+
+    Returns:
+        {"ok": True, "issue_id": "DEMO-123", "issue_url": "..."} 或 {"ok": False, "error": "..."}
+    """
+    if not JIRA_ENABLED:
+        return {"ok": False, "error": "Jira 未启用"}
+
+    # 根据 PR 标题前缀推断工单类型
+    issue_type = JIRA_ISSUE_TYPE  # 默认 Task
+    if re.match(r"^feat", title, re.IGNORECASE):
+        issue_type = "Story"
+    elif re.match(r"^fix", title, re.IGNORECASE):
+        issue_type = "Bug"
+
+    # 清理标题：去掉 type(scope): 前缀，保留描述
+    clean_title = re.sub(r"^\w+(\(.+?\))?!?:\s*", "", title).strip() or title
+    summary = f"[{repo}] {clean_title}" if repo else clean_title
+
+    description = f"自动创建自 PR：{pr_url}\n\n---\n\n{body or '（无描述）'}"
+
+    headers = {
+        "Authorization": _get_auth_header(),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    payload = {
+        "fields": {
+            "project": {"key": JIRA_PROJECT_KEY},
+            "summary": summary,
+            "description": description,
+            "issuetype": {"name": issue_type},
+        }
+    }
+
+    url = f"{JIRA_BASE_URL.rstrip('/')}/issue"
+    try:
+        resp = httpx.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        issue_key = data.get("key", "")
+        issue_url = f"{JIRA_URL}/browse/{issue_key}" if JIRA_URL else ""
+        return {"ok": True, "issue_id": issue_key, "issue_url": issue_url, "issue_type": issue_type}
+    except Exception as e:
+        return {"ok": False, "error": f"创建 Jira 工单失败：{e}"}
