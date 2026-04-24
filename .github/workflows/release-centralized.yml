@@ -257,6 +257,17 @@ jobs:
           echo ""
           echo "如需实际创建 PR，请取消勾选 dry_run 选项"
 
+  collect-docs:
+    name: Collect Changelogs for Docs
+    needs: [parse-input, update-changelog]
+    if: success() && !inputs.dry_run
+    uses: ./.github/workflows/docs-collect-changelogs.yml
+    with:
+      repositories: ${{ inputs.repositories }}
+      release_date: ${{ inputs.release_date }}
+      dry_run: false
+    secrets: inherit
+
   notify-feishu:
     name: Notify Feishu
     needs: [parse-input, update-changelog]

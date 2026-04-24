@@ -1,0 +1,74 @@
+name: 'Claude Agent PR Review'
+description: '使用 Claude Code Agent 主动探索代码库并审查 PR，比纯 diff 分析更深入'
+author: 'wuji-technology'
+
+inputs:
+  github-token:
+    description: 'GitHub Token，用于发布评论'
+    required: true
+  anthropic-api-key:
+    description: 'Anthropic API Key'
+    required: true
+  model:
+    description: 'Claude 模型'
+    required: false
+    default: 'claude-sonnet-4-6'
+  language:
+    description: 'Review 语言 (zh / en)'
+    required: false
+    default: 'zh'
+  max-diff-lines:
+    description: 'diff 最大行数'
+    required: false
+    default: '1500'
+
+outputs:
+  comment-url:
+    description: 'Review 评论 URL'
+    value: ${{ steps.post-comment.outputs.comment-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Claude Code CLI
+      shell: bash
+      run: npm install -g @anthropic-ai/claude-code --quiet 2>/dev/null; claude --version
+
+    - name: Prepare PR context
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        MAX_LINES: ${{ inputs.max-diff-lines }}
+      run: |
+        PR_NUMBER=${{ github.event.pull_request.number }}
+        gh pr diff $PR_NUMBER | head -n "$MAX_LINES" > /tmp/pr.diff
+        gh pr diff $PR_NUMBER --name-only > /tmp/changed-files.txt
+        gh pr view $PR_NUMBER --json body -q '.body' > /tmp/pr-body.txt 2>/dev/null || echo "" > /tmp/pr-body.txt
+
+    - name: Run Claude Agent Review
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        CLAUDE_LANGUAGE: ${{ inputs.language }}
+        CLAUDE_MODEL: ${{ inputs.model }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+      run: python3 ${{ github.action_path }}/run_agent.py > /tmp/agent-review.md
+
+    - name: Post review comment
+      id: post-comment
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        PR_NUMBER=${{ github.event.pull_request.number }}
+        comment_url=$(gh pr comment $PR_NUMBER \
+          --repo ${{ github.repository }} \
+          --body-file /tmp/agent-review.md \
+          --edit-last 2>/dev/null \
+          || gh pr comment $PR_NUMBER \
+          --repo ${{ github.repository }} \
+          --body-file /tmp/agent-review.md)
+        echo "comment-url=$comment_url" >> $GITHUB_OUTPUT
+        echo "✅ Agent review posted: $comment_url"

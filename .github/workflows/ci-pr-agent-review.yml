@@ -1,0 +1,64 @@
+name: CI - Claude Multi-Agent PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+  workflow_call:
+    inputs:
+      language:
+        description: 'Review 语言 (zh / en)'
+        type: string
+        default: zh
+    secrets:
+      review-token:
+        required: true
+      review-server-url:
+        required: true
+
+jobs:
+  review:
+    name: Claude Multi-Agent Review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Request review from server
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REVIEW_TOKEN: ${{ secrets.REVIEW_TOKEN || secrets.review-token }}
+          REVIEW_SERVER_URL: ${{ vars.REVIEW_SERVER_URL || secrets.review-server-url }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          REPO="${{ github.event.pull_request.head.repo.name }}"
+          TITLE="${{ github.event.pull_request.title }}"
+          BODY=$(gh pr view $PR --json body -q '.body' 2>/dev/null || echo "")
+
+          curl -sf \
+            -X POST "${REVIEW_SERVER_URL}/review" \
+            -H "Authorization: Bearer ${REVIEW_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"repo\": \"${REPO}\",
+              \"pr_number\": ${PR},
+              \"title\": $(echo "$TITLE" | jq -Rs .),
+              \"body\": $(echo "$BODY" | jq -Rs .),
+              \"language\": \"${{ inputs.language || 'zh' }}\"
+            }" \
+            > /tmp/review.md
+
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          gh pr comment $PR \
+            --repo ${{ github.repository }} \
+            --body-file /tmp/review.md \
+            --edit-last 2>/dev/null \
+          || gh pr comment $PR \
+            --repo ${{ github.repository }} \
+            --body-file /tmp/review.md

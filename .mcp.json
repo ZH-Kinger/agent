@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "wuji-release": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["mcp-server/server.py"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}",
+        "GITHUB_ORG": "wuji-technology"
+      }
+    }
+  }
+}

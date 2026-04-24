@@ -1,0 +1,58 @@
+name: CI - Qwen PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  qwen-review:
+    name: Qwen Code Review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pip install openai httpx -q
+
+      - name: Fetch PR diff
+        id: diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr diff ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} | head -n 800 > /tmp/pr.diff
+          echo "diff_size=$(wc -l < /tmp/pr.diff)" >> $GITHUB_OUTPUT
+
+      - name: Run Qwen review
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'qwen-max' }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 .github/actions/qwen-review/review.py \
+            --diff /tmp/pr.diff \
+            --title "$PR_TITLE" \
+            --body "$PR_BODY" \
+            --model "$LLM_MODEL" \
+            --language zh \
+            > /tmp/review.md
+
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body-file /tmp/review.md \
+            --edit-last 2>/dev/null \
+          || gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body-file /tmp/review.md

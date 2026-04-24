@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Claude PR review script — called by the claude-review composite action."""
+"""Qwen PR review script — OpenAI-compatible API (DashScope / Qwen-Max)."""
 
 import argparse
 import re
 import sys
-import anthropic
+from openai import OpenAI
 
 # PR 标题合法前缀（Conventional Commits）
 _VALID_PREFIXES = (
     "feat", "fix", "docs", "style", "refactor",
     "perf", "test", "chore", "ci", "build", "revert",
 )
-# 工作项关联正则（Resolve m-xxx 或 f-xxx）
-_WORK_ITEM_RE = re.compile(r"\b[Rr]esolve[sd]?\s+[mf]-\d+", re.IGNORECASE)
+# 工作项关联正则（Resolve m-xxx 或 f-xxx，或 JIRA-123 格式）
+_WORK_ITEM_RE = re.compile(
+    r"\b[Rr]esolve[sd]?\s+[mf]-\d+|\b[A-Z]+-\d+",
+    re.IGNORECASE,
+)
 
 SYSTEM_ZH = """你是一名资深工程师，负责 Pull Request 代码审查。
 
@@ -30,7 +33,7 @@ SYSTEM_ZH = """你是一名资深工程师，负责 Pull Request 代码审查。
 5. 测试覆盖 — 关键路径是否有测试
 
 输出格式（Markdown，严格遵守）：
-## 🤖 Claude Code Review
+## 🤖 AI Code Review (Qwen)
 
 ### 总体评价
 一句话总结。
@@ -67,7 +70,7 @@ Review priorities:
 5. Test coverage — critical paths covered
 
 Output format (Markdown, strictly follow):
-## 🤖 Claude Code Review
+## 🤖 AI Code Review (Qwen)
 
 ### Summary
 One-sentence overall assessment.
@@ -117,7 +120,7 @@ def check_pr_conventions(title: str, body: str, diff: str, language: str) -> str
                 f"type should be `feat` / `fix` / `docs` / `chore` etc."
             )
 
-    # 2. 工作项关联检查（Resolve m-xxx 或 f-xxx）
+    # 2. 工作项关联检查
     if body and not _WORK_ITEM_RE.search(body):
         if language == "zh":
             warnings.append(
@@ -157,7 +160,7 @@ def main():
     parser.add_argument("--diff", required=True)
     parser.add_argument("--title", default="")
     parser.add_argument("--body", default="")
-    parser.add_argument("--model", default="claude-sonnet-4-5")
+    parser.add_argument("--model", default="qwen-max")
     parser.add_argument("--language", default="zh", choices=["zh", "en"])
     args = parser.parse_args()
 
@@ -168,21 +171,23 @@ def main():
         print("✅ LGTM — diff is empty, nothing to review.")
         return
 
-    # PR 规范检查（不调用 Claude，本地完成）
+    # PR 规范检查（本地，无 API 费用）
     convention_warnings = check_pr_conventions(args.title, args.body, diff, args.language)
 
-    # Claude 代码审查
+    # LLM 代码审查（OpenAI 兼容接口）
     system = SYSTEM_ZH if args.language == "zh" else SYSTEM_EN
     user_msg = f"PR Title: {args.title}\n\nPR Description:\n{args.body}\n\n```diff\n{diff}\n```"
 
-    client = anthropic.Anthropic()
-    message = client.messages.create(
+    client = OpenAI()
+    response = client.chat.completions.create(
         model=args.model,
         max_tokens=2048,
-        system=system,
-        messages=[{"role": "user", "content": user_msg}],
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
     )
-    review_text = message.content[0].text
+    review_text = response.choices[0].message.content
 
     # 拼接输出：规范检查在前，代码审查在后
     output_parts = []
