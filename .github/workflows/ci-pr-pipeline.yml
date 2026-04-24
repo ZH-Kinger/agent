@@ -51,6 +51,7 @@ jobs:
         env:
           REVIEW_TOKEN: ${{ secrets.REVIEW_TOKEN }}
           REVIEW_SERVER_URL: ${{ secrets.REVIEW_SERVER_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR=${{ github.event.pull_request.number }}
           REPO="${{ github.event.pull_request.head.repo.name }}"
@@ -85,8 +86,6 @@ jobs:
             echo "" >> /tmp/review.md
             echo "Review 服务器返回错误 (HTTP $HTTP_CODE)，请检查服务器状态。" >> /tmp/review.md
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Post review comment
         env:
