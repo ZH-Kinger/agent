@@ -8,8 +8,12 @@ wuji-release MCP Server
   或通过环境变量:             MCP_TRANSPORT=http python server.py
 """
 import asyncio
+import logging
 import os
+import re
 import sys
+import time
+import traceback
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -17,13 +21,31 @@ import mcp.types as types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
+from config import (
+    BOOTSTRAP_TOKEN,
+    DEBUG_MODE,
+    LOG_LEVEL,
+    MCP_PORT,
+    MCP_TRANSPORT,
+    REVIEW_TOKEN,
+    get_repo_token,
+    issue_repo_token,
+    public_runtime_config,
+)
 from tools.validate import validate_release_input
-from tools.changelog import preview_changelog, fetch_unreleased_section
+from tools.changelog import preview_changelog
 from tools.github_actions import trigger_release, get_workflow_status
 from tools.fetch import fetch_changelog
 from tools.versions import get_current_versions, suggest_next_version
 
 server = Server("wuji-release")
+logger = logging.getLogger("wuji-release")
+REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def setup_logging():
+    level = getattr(logging, LOG_LEVEL, logging.INFO)
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 
 
 @server.list_tools()
@@ -215,37 +237,136 @@ def _run_http():
     from tools.feishu import send_review_card
     import uvicorn
 
-    port = int(os.environ.get("MCP_PORT", "8080"))
-    review_token = os.environ.get("REVIEW_TOKEN", "")
     sse = SseServerTransport("/mcp/messages")
 
-    async def handle_sse(scope, receive, send):
-        async with sse.connect_sse(scope, receive, send) as streams:
-            await server.run(streams[0], streams[1], server.create_initialization_options())
+    def unauthorized_response(message: str = "Unauthorized"):
+        return JSONResponse({"error": message}, status_code=401)
 
-    async def handle_review(request: Request):
-        # Token 鉴权
-        auth = request.headers.get("authorization", "")
-        if review_token and auth != f"Bearer {review_token}":
-            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    def bad_request(message: str):
+        return JSONResponse({"error": message}, status_code=400)
+
+    def server_error(message: str, request_id: str = ""):
+        payload = {"error": message}
+        if request_id:
+            payload["request_id"] = request_id
+        return JSONResponse(payload, status_code=500)
+
+    def log_request_end(name: str, request_id: str, started_at: float, status_code: int, **fields):
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        details = " ".join(f"{k}={v}" for k, v in fields.items() if v not in ("", None))
+        logger.info(
+            "%s request finished request_id=%s status=%s elapsed_ms=%s %s",
+            name,
+            request_id,
+            status_code,
+            elapsed_ms,
+            details,
+        )
+
+    def parse_bearer_token(auth_header: str) -> str:
+        prefix = "Bearer "
+        if not auth_header.startswith(prefix):
+            return ""
+        return auth_header[len(prefix):].strip()
+
+    def verify_review_token(auth_header: str, org: str, repo: str) -> tuple[bool, str]:
+        token = parse_bearer_token(auth_header)
+        if not token:
+            return False, "Missing bearer token"
+
+        repo_token = get_repo_token(org, repo)
+        if repo_token:
+            return token == repo_token, "repo"
+
+        if REVIEW_TOKEN:
+            return token == REVIEW_TOKEN, "shared"
+
+        return True, "open"
+
+    async def handle_sse(scope, receive, send):
+        request_id = f"sse-{int(time.time() * 1000)}"
+        started_at = time.perf_counter()
+        client = scope.get("client") or ("unknown", "")
+        logger.info("sse connect request_id=%s client=%s:%s", request_id, client[0], client[1])
+        try:
+            async with sse.connect_sse(scope, receive, send) as streams:
+                await server.run(streams[0], streams[1], server.create_initialization_options())
+            log_request_end("sse", request_id, started_at, 200, client=client[0])
+        except Exception as exc:
+            logger.exception("sse connect failed request_id=%s error=%s", request_id, exc)
+            if DEBUG_MODE:
+                body = f"SSE connection failed\nrequest_id={request_id}\n\n{traceback.format_exc()}"
+            else:
+                body = f"SSE connection failed. request_id={request_id}. Check server logs."
+            response = PlainTextResponse(body, status_code=500)
+            await response(scope, receive, send)
+
+    async def handle_debug_config(request: Request):
+        return JSONResponse(public_runtime_config())
+
+    async def handle_ready(request: Request):
+        return JSONResponse({"ok": True, **public_runtime_config()})
+
+    async def handle_bootstrap_register(request: Request):
+        request_id = f"bootstrap-{int(time.time() * 1000)}"
+        started_at = time.perf_counter()
+        auth = parse_bearer_token(request.headers.get("authorization", ""))
+        if not BOOTSTRAP_TOKEN or auth != BOOTSTRAP_TOKEN:
+            log_request_end("bootstrap", request_id, started_at, 401)
+            return unauthorized_response("Invalid bootstrap token")
 
         try:
             data = await request.json()
         except Exception:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            log_request_end("bootstrap", request_id, started_at, 400)
+            return bad_request("Invalid JSON")
+
+        repo_full_name = str(data.get("repo_full_name", "")).strip()
+        if not REPO_SLUG_RE.match(repo_full_name):
+            log_request_end("bootstrap", request_id, started_at, 400, repo_full_name=repo_full_name)
+            return bad_request("repo_full_name must be org/repo")
+
+        org, repo = repo_full_name.split("/", 1)
+        review_token = issue_repo_token(org, repo)
+        logger.info("bootstrap register request_id=%s repo=%s", request_id, repo_full_name)
+        log_request_end("bootstrap", request_id, started_at, 200, repo=repo_full_name)
+        return JSONResponse({
+            "ok": True,
+            "repo_full_name": repo_full_name,
+            "review_token": review_token,
+            "request_id": request_id,
+        })
+
+    async def handle_review(request: Request):
+        request_id = f"review-{int(time.time() * 1000)}"
+        started_at = time.perf_counter()
+
+        try:
+            data = await request.json()
+        except Exception:
+            log_request_end("review", request_id, started_at, 400)
+            return bad_request("Invalid JSON")
 
         repo = data.get("repo", "")
+        org = data.get("org", os.environ.get("GITHUB_ORG", ""))
         pr_number = data.get("pr_number") or data.get("pr")
         if not repo or not pr_number:
-            return JSONResponse({"error": "repo and pr_number are required"}, status_code=400)
+            log_request_end("review", request_id, started_at, 400, repo=repo, pr_number=pr_number)
+            return bad_request("repo and pr_number are required")
 
-        # Jira 构造配置（从环境变量读取）
+        auth_ok, auth_mode = verify_review_token(request.headers.get("authorization", ""), org, repo)
+        if not auth_ok:
+            log_request_end("review", request_id, started_at, 401, repo=repo, pr_number=pr_number)
+            return unauthorized_response()
+
+        logger.info("review request started request_id=%s repo=%s pr_number=%s auth=%s", request_id, repo, pr_number, auth_mode)
+
         jira_integration = None
         if os.environ.get("JIRA_SYNC_TO_JIRA", "false").lower() == "true":
             jira_integration = {
                 "sync_to_jira": True,
                 "status_mapping": {
-                    "blocker": os.environ.get("JIRA_BLOCKER_STATUS_ID", "3"),  # 默认退回 To Do
+                    "blocker": os.environ.get("JIRA_BLOCKER_STATUS_ID", "3"),
                 }
             }
 
@@ -259,39 +380,30 @@ def _run_http():
         )
 
         if not result["ok"]:
-            return JSONResponse({"error": result["error"]}, status_code=500)
+            logger.error("review failed request_id=%s repo=%s pr_number=%s error=%s", request_id, repo, pr_number, result["error"])
+            log_request_end("review", request_id, started_at, 500, repo=repo, pr_number=pr_number)
+            return server_error(result["error"], request_id)
 
         review_text = result["review"]
         jira_synced = result.get("jira_synced", False)
         jira_action = result.get("jira_action", None)
 
-        # 可选：如果 Jira 已退回，在文本开头标记（GitHub Actions 可解析）
         if jira_synced and jira_action == "blocked_and_retuned":
             prefix = "---\n[TRIGGER_JIRA_RETUN]:true\n---\n\n"
             review_text = prefix + review_text
 
+        log_request_end("review", request_id, started_at, 200, repo=repo, pr_number=pr_number, auth=auth_mode)
         return PlainTextResponse(review_text)
 
     async def handle_pipeline(request: Request):
-        """
-        /pr-pipeline — 一站式 PR 处理：
-        1. 拉 diff
-        2. 自动创建 Jira 工单
-        3. AI Review
-        4. 评论到 PR
-        5. 飞书通知
-        """
-        import re as _re
-
-        # 鉴权
-        auth = request.headers.get("authorization", "")
-        if review_token and auth != f"Bearer {review_token}":
-            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        request_id = f"pipeline-{int(time.time() * 1000)}"
+        started_at = time.perf_counter()
 
         try:
             data = await request.json()
         except Exception:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            log_request_end("pipeline", request_id, started_at, 400)
+            return bad_request("Invalid JSON")
 
         repo = data.get("repo", "")
         pr_number = data.get("pr_number") or data.get("pr")
@@ -301,27 +413,31 @@ def _run_http():
         pr_url = f"https://github.com/{org}/{repo}/pull/{pr_number}"
 
         if not repo or not pr_number:
-            return JSONResponse({"error": "repo and pr_number are required"}, status_code=400)
+            log_request_end("pipeline", request_id, started_at, 400, repo=repo, pr_number=pr_number)
+            return bad_request("repo and pr_number are required")
 
+        auth_ok, auth_mode = verify_review_token(request.headers.get("authorization", ""), org, repo)
+        if not auth_ok:
+            log_request_end("pipeline", request_id, started_at, 401, repo=repo, pr_number=pr_number)
+            return unauthorized_response()
+
+        logger.info("pipeline request started request_id=%s repo=%s pr_number=%s org=%s auth=%s", request_id, repo, pr_number, org, auth_mode)
         result_log = {"steps": []}
 
-        # Step 1: 自动创建 Jira 工单（如果 PR 描述中没有已关联的 Jira ID）
         jira_id = extract_jira_id_from_text(body) or extract_jira_id_from_text(title)
         jira_url = ""
         if not jira_id:
-            jira_result = create_jira_issue(
-                title=title, body=body, pr_url=pr_url, repo=repo
-            )
+            jira_result = create_jira_issue(title=title, body=body, pr_url=pr_url, repo=repo)
             if jira_result["ok"]:
                 jira_id = jira_result["issue_id"]
                 jira_url = jira_result.get("issue_url", "")
                 result_log["steps"].append(f"✅ Jira 工单已创建: {jira_id}")
             else:
                 result_log["steps"].append(f"⚠️ Jira 创建失败: {jira_result['error']}")
+                logger.warning("jira create failed request_id=%s repo=%s pr_number=%s error=%s", request_id, repo, pr_number, jira_result["error"])
         else:
             result_log["steps"].append(f"ℹ️ 已关联 Jira: {jira_id}")
 
-        # Step 2: AI Review
         review_result = pr_review(
             repo=repo,
             pr_number=int(pr_number),
@@ -331,13 +447,14 @@ def _run_http():
         )
 
         if not review_result["ok"]:
-            return JSONResponse({"error": review_result["error"]}, status_code=500)
+            logger.error("pipeline review failed request_id=%s repo=%s pr_number=%s error=%s", request_id, repo, pr_number, review_result["error"])
+            log_request_end("pipeline", request_id, started_at, 500, repo=repo, pr_number=pr_number)
+            return server_error(review_result["error"], request_id)
 
         review_text = review_result["review"]
-        has_blocker = bool(_re.search(r"\|\s*Blocker\s*\|", review_text, _re.MULTILINE))
+        has_blocker = bool(re.search(r"\|\s*Blocker\s*\|", review_text, re.MULTILINE))
         result_log["steps"].append("✅ AI Review 完成")
 
-        # Step 3: 拼接最终评论（包含 Jira 链接）
         comment_parts = []
         if jira_id:
             jira_link = f"[{jira_id}]({jira_url})" if jira_url else jira_id
@@ -345,9 +462,7 @@ def _run_http():
         comment_parts.append(review_text)
         final_comment = "\n\n".join(comment_parts)
 
-        # Step 4: 飞书通知
-        # 提取 review 摘要（取“整体结论”或“总体评价”部分）
-        summary_match = _re.search(r"###\s*(整体结论|总体评价|Summary)\s*\n(.+?)(?=\n###|$)", review_text, _re.DOTALL)
+        summary_match = re.search(r"###\s*(整体结论|总体评价|Summary)\s*\n(.+?)(?=\n###|$)", review_text, re.DOTALL)
         review_summary = summary_match.group(2).strip() if summary_match else review_text[:300]
 
         feishu_result = send_review_card(
@@ -363,14 +478,16 @@ def _run_http():
             result_log["steps"].append("✅ 飞书通知已发送")
         else:
             result_log["steps"].append(f"⚠️ 飞书通知失败: {feishu_result['error']}")
+            logger.warning("feishu notify failed request_id=%s repo=%s pr_number=%s error=%s", request_id, repo, pr_number, feishu_result["error"])
 
-        # 返回结果（GitHub Actions 用 review 文本贴评论）
+        log_request_end("pipeline", request_id, started_at, 200, repo=repo, pr_number=pr_number, has_blocker=has_blocker, auth=auth_mode)
         return JSONResponse({
             "review": final_comment,
             "jira_id": jira_id,
             "jira_url": jira_url,
             "has_blocker": has_blocker,
             "steps": result_log["steps"],
+            "request_id": request_id,
         })
 
     app = Starlette(routes=[
@@ -378,16 +495,21 @@ def _run_http():
         Route("/mcp/messages", endpoint=sse.handle_post_message, methods=["POST"]),
         Route("/review", endpoint=handle_review, methods=["POST"]),
         Route("/pr-pipeline", endpoint=handle_pipeline, methods=["POST"]),
+        Route("/bootstrap/register-repo", endpoint=handle_bootstrap_register, methods=["POST"]),
         Route("/health", endpoint=lambda _: PlainTextResponse("ok")),
+        Route("/ready", endpoint=handle_ready),
+        Route("/debug/config", endpoint=handle_debug_config),
     ])
-    print(f"🚀 wuji-release MCP HTTP Server → http://0.0.0.0:{port}/mcp/sse")
-    print(f"🔍 PR Review endpoint → http://0.0.0.0:{port}/review")
-    print(f"📦 PR Pipeline endpoint → http://0.0.0.0:{port}/pr-pipeline")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    logger.info("wuji-release MCP HTTP Server listening on http://0.0.0.0:%s/mcp/sse", MCP_PORT)
+    logger.info("PR Review endpoint listening on http://0.0.0.0:%s/review", MCP_PORT)
+    logger.info("PR Pipeline endpoint listening on http://0.0.0.0:%s/pr-pipeline", MCP_PORT)
+    logger.info("Bootstrap endpoint listening on http://0.0.0.0:%s/bootstrap/register-repo", MCP_PORT)
+    uvicorn.run(app, host="0.0.0.0", port=MCP_PORT)
 
 
 def main():
-    use_http = "--http" in sys.argv or os.environ.get("MCP_TRANSPORT") == "http"
+    setup_logging()
+    use_http = "--http" in sys.argv or MCP_TRANSPORT == "http"
     if use_http:
         _run_http()
     else:

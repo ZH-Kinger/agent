@@ -4,6 +4,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
+include = ["templates/*.yml"]
 
 [project]
 name = "wuji-release-mcp"
@@ -24,3 +25,4 @@ dependencies = [
 [project.scripts]
 wuji-release-mcp = "server:main"   # MCP server（stdio 或 HTTP）
 wuji-release = "cli:main"          # 纯命令行，不依赖 Claude
+wuji-review = "cli:main"           # 仓库初始化与接入

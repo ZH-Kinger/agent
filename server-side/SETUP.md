@@ -6,11 +6,12 @@
 
 ```
 云服务器 (Docker)
-├── /health          → 健康检查
-├── /review          → 单独的 AI Review（兼容旧接口）
-├── /pr-pipeline     → 一站式处理：Jira + AI Review + 飞书通知
-├── /mcp/sse         → MCP SSE 连接（Claude Code 远程接入）
-└── /mcp/messages    → MCP 消息
+├── /health                   → 健康检查
+├── /review                   → 单独的 AI Review（兼容旧接口）
+├── /pr-pipeline              → 一站式处理：Jira + AI Review + 飞书通知
+├── /bootstrap/register-repo  → 初始化时为仓库签发专属 REVIEW_TOKEN
+├── /mcp/sse                  → MCP SSE 连接（Claude Code 远程接入）
+└── /mcp/messages             → MCP 消息
 ```
 
 ## 快速部署
@@ -34,6 +35,20 @@ docker logs -f wuji-review-server
 
 # 验证健康
 curl http://localhost:8080/health
+curl http://localhost:8080/ready
+curl http://localhost:8080/debug/config
+```
+
+### 初始化接入用的额外环境变量
+
+- `BOOTSTRAP_TOKEN`：给 `wuji-review init` 用的管理员初始化口令
+- `REPO_TOKENS_FILE`：仓库专属 REVIEW_TOKEN 的持久化文件路径
+
+推荐设置：
+
+```env
+BOOTSTRAP_TOKEN=your-bootstrap-token-here
+REPO_TOKENS_FILE=/data/repo_tokens.json
 ```
 
 ### 3. 直接运行（开发调试）
@@ -43,6 +58,46 @@ cd mcp-server
 pip install -e .
 MCP_TRANSPORT=http python server.py
 ```
+
+## 诊断与排障
+
+### 基础自检
+
+```bash
+curl http://localhost:8080/health
+curl http://localhost:8080/ready
+curl http://localhost:8080/debug/config
+curl -i http://localhost:8080/mcp/sse
+```
+
+- `/health`：服务是否存活
+- `/ready`：返回脱敏后的运行状态摘要
+- `/debug/config`：检查 transport、port、Jira/Feishu 是否启用
+- `/mcp/sse`：验证远端 MCP 入口是否正常建立连接
+- `/bootstrap/register-repo`：验证初始化签发链路是否已启用（需 `BOOTSTRAP_TOKEN`）
+
+### 查看日志
+
+```bash
+docker logs --tail 200 wuji-review-server
+```
+
+重点关注：
+- `sse connect failed`
+- `review failed`
+- `pipeline review failed`
+- `jira create failed`
+- `feishu notify failed`
+
+### 反向代理注意事项
+
+如果前面挂了 Nginx / HTTPS 反代，SSE 需要保留长连接并关闭缓冲，否则 `/mcp/sse` 可能异常：
+
+- 关闭 proxy buffering
+- 保留 `Connection` / `Cache-Control` 相关头
+- 提高 read timeout
+- 确保公网可访问 `/mcp/sse` 和 `/mcp/messages`
+
 
 ## API 端点
 
@@ -55,6 +110,10 @@ GitHub Actions 调用的主端点。一次请求完成全部流程。
 Authorization: Bearer <REVIEW_TOKEN>
 Content-Type: application/json
 ```
+
+`REVIEW_TOKEN` 支持两种模式：
+- 旧模式：所有仓库共用 `server-side/.env` 里的全局 `REVIEW_TOKEN`
+- 新模式：通过 `/bootstrap/register-repo` 为每个仓库签发专属 token
 
 **Body:**
 ```json
@@ -80,6 +139,33 @@ Content-Type: application/json
     "✅ AI Review 完成",
     "✅ 飞书通知已发送"
   ]
+}
+```
+
+### POST /bootstrap/register-repo
+
+初始化命令 `wuji-review init` 调用的注册端点，用于为当前仓库签发专属 `REVIEW_TOKEN`。
+
+**Headers:**
+```
+Authorization: Bearer <BOOTSTRAP_TOKEN>
+Content-Type: application/json
+```
+
+**Body:**
+```json
+{
+  "repo_full_name": "wuji-technology/wujihandpy"
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "repo_full_name": "wuji-technology/wujihandpy",
+  "review_token": "wr_xxxxx",
+  "request_id": "bootstrap-1712345678901"
 }
 ```
 

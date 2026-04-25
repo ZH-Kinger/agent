@@ -7,7 +7,7 @@ COPY mcp-server/ ./mcp-server/
 COPY scripts/ ./scripts/
 
 # 安装依赖
-RUN pip install --no-cache-dir mcp-server/
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com mcp-server/
 
 WORKDIR /app/mcp-server
 

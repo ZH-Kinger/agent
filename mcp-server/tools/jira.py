@@ -163,12 +163,8 @@ def create_jira_issue(title: str, body: str, pr_url: str, repo: str = "") -> dic
     if not JIRA_ENABLED:
         return {"ok": False, "error": "Jira 未启用"}
 
-    # 根据 PR 标题前缀推断工单类型
+    # 统一使用配置的工单类型（避免项目不支持 Story/Bug 导致 400 错误）
     issue_type = JIRA_ISSUE_TYPE  # 默认 Task
-    if re.match(r"^feat", title, re.IGNORECASE):
-        issue_type = "Story"
-    elif re.match(r"^fix", title, re.IGNORECASE):
-        issue_type = "Bug"
 
     # 清理标题：去掉 type(scope): 前缀，保留描述
     clean_title = re.sub(r"^\w+(\(.+?\))?!?:\s*", "", title).strip() or title
