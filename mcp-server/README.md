@@ -5,13 +5,32 @@
 - **stdio 模式**：本地运行，适合个人使用 Claude Code
 - **SSE 模式**：连接部署在服务器上的远端 MCP
 
-## 一条命令初始化
+## 安装
 
-如果你想把接入流程压到最低，直接在目标业务仓库里执行：
+从 GitHub 直接安装：
 
 ```bash
-pip install -e /path/to/mcp-server
-wuji-review init --server-url http://<服务器IP>:8080 --review-token <REVIEW_TOKEN>
+pip install git+https://github.com/ZH-Kinger/agent.git#subdirectory=mcp-server
+```
+
+或克隆后本地安装（开发调试用）：
+
+```bash
+git clone https://github.com/ZH-Kinger/agent.git
+pip install -e agent/mcp-server
+```
+
+安装后提供三个命令：
+- `wuji-release-mcp` — MCP Server（stdio 或 HTTP）
+- `wuji-release` — Release 命令行工具
+- `wuji-review` — 仓库初始化与接入
+
+## 一条命令初始化业务仓库
+
+在目标业务仓库里执行：
+
+```bash
+wuji-review init --server-url http://<服务器IP>:8080 --bootstrap-token <BOOTSTRAP_TOKEN>
 ```
 
 这个命令会自动：
@@ -19,7 +38,9 @@ wuji-review init --server-url http://<服务器IP>:8080 --review-token <REVIEW_T
 - 写入 `.github/workflows/ci-pr-pipeline.yml`
 - 写入 `.mcp.json`
 - 检查 `gh auth status`
-- 在可用时自动写入 GitHub Secrets
+- 识别当前 GitHub 仓库
+- 调服务端 `/bootstrap/register-repo` 申请仓库专属 `REVIEW_TOKEN`
+- 自动写入 GitHub Secrets（`REVIEW_SERVER_URL` + `REVIEW_TOKEN`）
 - 验证服务端 `/health`
 - 输出测试 PR 的下一步
 
@@ -67,13 +88,20 @@ wuji-review doctor --server-url http://<服务器IP>:8080
 
 ## 常用能力
 
-- `wuji-review init`
-- `wuji-review doctor`
-- `suggest_next_version`
-- `get_current_versions`
-- `fetch_changelog`
-- `trigger_release`
-- `get_workflow_status`
+### Review 相关（CLI）
+
+- `wuji-review init` — 一条命令初始化业务仓库
+- `wuji-review doctor` — 检查接入状态和服务端连通性
+
+### Release 相关（CLI / MCP）
+
+- `suggest_next_version` — 推断下一版本号
+- `get_current_versions` — 查询各仓库当前版本
+- `fetch_changelog` — 获取指定版本的 CHANGELOG
+- `validate_release_input` — 校验 repo=version 格式
+- `preview_changelog` — dry-run 预览 CHANGELOG 更新
+- `trigger_release` — 触发 release workflow
+- `get_workflow_status` — 查询 workflow 运行状态
 
 ## 连接失败时
 

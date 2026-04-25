@@ -1,13 +1,8 @@
 {
   "mcpServers": {
     "wuji-release": {
-      "type": "stdio",
-      "command": "python",
-      "args": ["mcp-server/server.py"],
-      "env": {
-        "GITHUB_TOKEN": "${GITHUB_TOKEN}",
-        "GITHUB_ORG": "wuji-technology"
-      }
+      "type": "sse",
+      "url": "http://115.191.2.86:8080/mcp/sse"
     }
   }
 }

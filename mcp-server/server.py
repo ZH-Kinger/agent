@@ -283,13 +283,13 @@ def _run_http():
 
         return True, "open"
 
-    async def handle_sse(scope, receive, send):
+    async def handle_sse(request: Request):
         request_id = f"sse-{int(time.time() * 1000)}"
         started_at = time.perf_counter()
-        client = scope.get("client") or ("unknown", "")
+        client = request.scope.get("client") or ("unknown", "")
         logger.info("sse connect request_id=%s client=%s:%s", request_id, client[0], client[1])
         try:
-            async with sse.connect_sse(scope, receive, send) as streams:
+            async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
                 await server.run(streams[0], streams[1], server.create_initialization_options())
             log_request_end("sse", request_id, started_at, 200, client=client[0])
         except Exception as exc:
@@ -298,8 +298,7 @@ def _run_http():
                 body = f"SSE connection failed\nrequest_id={request_id}\n\n{traceback.format_exc()}"
             else:
                 body = f"SSE connection failed. request_id={request_id}. Check server logs."
-            response = PlainTextResponse(body, status_code=500)
-            await response(scope, receive, send)
+            return PlainTextResponse(body, status_code=500)
 
     async def handle_debug_config(request: Request):
         return JSONResponse(public_runtime_config())
