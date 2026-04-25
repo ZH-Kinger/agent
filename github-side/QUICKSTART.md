@@ -7,7 +7,7 @@
 先安装工具，然后在目标业务仓库执行：
 
 ```bash
-pip install -e /path/to/mcp-server
+pip install git+https://github.com/ZH-Kinger/agent.git#subdirectory=mcp-server
 wuji-review init --server-url http://<服务器IP>:8080 --bootstrap-token <BOOTSTRAP_TOKEN>
 ```
 
@@ -18,7 +18,7 @@ wuji-review init --server-url http://<服务器IP>:8080 --bootstrap-token <BOOTS
 - 检查 `gh auth status`
 - 识别当前 GitHub 仓库
 - 调服务端 `/bootstrap/register-repo` 申请仓库专属 `REVIEW_TOKEN`
-- 在可用时自动写入 `REVIEW_SERVER_URL`、`REVIEW_TOKEN`
+- 在可用时自动写入 `REVIEW_SERVER_URL`、`REVIEW_TOKEN` 到 GitHub Secrets
 - 检查服务端 `/health`
 - 输出测试 PR 的下一步
 

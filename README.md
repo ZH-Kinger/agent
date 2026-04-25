@@ -1,4 +1,4 @@
-# wuji-technology/.github
+# wuji-technology/agent
 
 面向研发团队的自动化协作平台：把 **PR 规范检查、AI Review、Jira、飞书通知、Release 自动化、Claude Code MCP** 串成一套可复用能力。
 
@@ -27,10 +27,10 @@
 
 ## 5 分钟快速开始
 
-如果你的目标是“先让一个业务仓库用起来”，现在优先用初始化命令：
+如果你的目标是"先让一个业务仓库用起来"，两行命令搞定：
 
 ```bash
-pip install -e ./mcp-server
+pip install git+https://github.com/ZH-Kinger/agent.git#subdirectory=mcp-server
 wuji-review init --server-url http://<服务器IP>:8080 --bootstrap-token <BOOTSTRAP_TOKEN>
 ```
 
@@ -74,10 +74,11 @@ wuji-review init --server-url http://<服务器IP>:8080 --bootstrap-token <BOOTS
 ### 2. Review Server
 部署到云服务器，负责执行真正的自动化能力。
 
+- `/health`、`/ready`、`/debug/config`：健康检查与诊断
 - `/review`：单独 AI Review
 - `/pr-pipeline`：Jira + AI Review + 飞书通知
+- `/bootstrap/register-repo`：为仓库签发专属 REVIEW_TOKEN
 - `/mcp/sse`：远端 MCP 连接入口
-- `/health`、`/ready`、`/debug/config`：健康检查与诊断
 
 目录：`server-side/`、`mcp-server/`
 
@@ -108,13 +109,35 @@ wuji-review init --server-url http://<服务器IP>:8080 --bootstrap-token <BOOTS
         ▼
 GitHub Actions（业务仓库）
         │
-        │ POST /pr-pipeline
+        │ POST /pr-pipeline (Bearer: 仓库专属 REVIEW_TOKEN)
         ▼
 Review Server（云服务器）
-   ├── AI Review
+   ├── AI Review（Qwen-Max via DashScope）
    ├── Jira 创建 / 关联
    ├── 飞书通知
+   ├── Token 签发（/bootstrap/register-repo）
    └── MCP SSE
+```
+
+### Token 分发流程
+
+```text
+管理员在服务器 .env 中设置 BOOTSTRAP_TOKEN + REPO_TOKENS_FILE
+        │
+        ▼
+开发者在业务仓库执行 wuji-review init --bootstrap-token xxx
+        │
+        ▼
+CLI 调用 POST /bootstrap/register-repo（用 BOOTSTRAP_TOKEN 鉴权）
+        │
+        ▼
+服务端自动生成 wr_xxxx（仓库专属 token），存入 REPO_TOKENS_FILE
+        │
+        ▼
+CLI 自动写入 GitHub Secrets（REVIEW_SERVER_URL + REVIEW_TOKEN）
+        │
+        ▼
+后续 PR 触发 GitHub Actions，用仓库专属 REVIEW_TOKEN 调 /pr-pipeline
 ```
 
 ---
@@ -130,6 +153,7 @@ Review Server（云服务器）
 | `/debug/config` | GET | 查看 transport / port / Jira / Feishu 等配置摘要 |
 | `/review` | POST | 单独执行 AI Review |
 | `/pr-pipeline` | POST | 执行 Jira + AI Review + 飞书通知 |
+| `/bootstrap/register-repo` | POST | 为仓库签发专属 REVIEW_TOKEN |
 | `/mcp/sse` | GET | Claude Code 远端 MCP SSE 连接 |
 | `/mcp/messages` | POST | MCP 消息通道 |
 
@@ -188,13 +212,26 @@ github-side/
 server-side/
 ├── Dockerfile
 ├── docker-compose.yml
+├── .env.example
 └── SETUP.md
 
 mcp-server/
 ├── README.md
-├── server.py
-├── config.py
+├── server.py          # HTTP Server + MCP Server
+├── config.py          # 环境变量配置
+├── cli.py             # CLI 工具（init / doctor / release）
+├── pyproject.toml
+├── templates/
+│   └── ci-pr-pipeline.yml
 └── tools/
+    ├── review.py      # AI Review（Qwen-Max）
+    ├── jira.py        # Jira 工单
+    ├── feishu.py      # 飞书通知
+    ├── changelog.py   # CHANGELOG 预览
+    ├── fetch.py       # 从 GitHub 抓取 CHANGELOG
+    ├── github_actions.py  # 触发 GitHub Actions
+    ├── validate.py    # 校验 repo=version 格式
+    └── versions.py    # 版本查询与推断
 
 docs/
 └── release-automation.md
