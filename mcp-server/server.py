@@ -236,7 +236,7 @@ def _run_http():
     from mcp.server.sse import SseServerTransport
     from tools.review import pr_review
     from tools.jira import create_jira_issue, extract_jira_id_from_text, add_jira_comment
-    from tools.feishu import send_review_card, notify_reviewers
+    from tools.feishu import send_review_card, notify_reviewers, send_reviewer_signup_card
     import uvicorn
 
     sse = SseServerTransport("/mcp/messages")
@@ -550,6 +550,60 @@ def _run_http():
             "request_id": request_id,
         })
 
+    async def handle_reviewer_signup(request: Request):
+        """GET /reviewers/signup?repo=org/repo&open_id=xxx&name=xxx&token=xxx"""
+        repo = request.query_params.get("repo", "")
+        open_id = request.query_params.get("open_id", "")
+        name = request.query_params.get("name", "")
+        token = request.query_params.get("token", "")
+
+        if not repo or not open_id:
+            return PlainTextResponse("Missing repo or open_id", status_code=400)
+
+        if not BOOTSTRAP_TOKEN or token != BOOTSTRAP_TOKEN:
+            return PlainTextResponse("Invalid token", status_code=401)
+
+        if "/" not in repo:
+            return PlainTextResponse("repo must be org/repo", status_code=400)
+
+        org, repo_name = repo.split("/", 1)
+        reviewers = get_repo_reviewers(org, repo_name)
+
+        # Check if already registered
+        if any(r.get("open_id") == open_id for r in reviewers):
+            return PlainTextResponse(f"Already registered as reviewer for {repo}")
+
+        reviewers.append({"open_id": open_id, "name": name or open_id})
+        set_repo_reviewers(org, repo_name, reviewers)
+        logger.info("reviewer signup repo=%s open_id=%s name=%s", repo, open_id, name)
+        return PlainTextResponse(f"Successfully registered as reviewer for {repo}")
+
+    async def handle_reviewer_signoff(request: Request):
+        """GET /reviewers/signoff?repo=org/repo&open_id=xxx&token=xxx"""
+        repo = request.query_params.get("repo", "")
+        open_id = request.query_params.get("open_id", "")
+        token = request.query_params.get("token", "")
+
+        if not repo or not open_id:
+            return PlainTextResponse("Missing repo or open_id", status_code=400)
+
+        if not BOOTSTRAP_TOKEN or token != BOOTSTRAP_TOKEN:
+            return PlainTextResponse("Invalid token", status_code=401)
+
+        if "/" not in repo:
+            return PlainTextResponse("repo must be org/repo", status_code=400)
+
+        org, repo_name = repo.split("/", 1)
+        reviewers = get_repo_reviewers(org, repo_name)
+        new_reviewers = [r for r in reviewers if r.get("open_id") != open_id]
+
+        if len(new_reviewers) == len(reviewers):
+            return PlainTextResponse(f"Not a reviewer for {repo}")
+
+        set_repo_reviewers(org, repo_name, new_reviewers)
+        logger.info("reviewer signoff repo=%s open_id=%s", repo, open_id)
+        return PlainTextResponse(f"Successfully removed as reviewer for {repo}")
+
     app = Starlette(routes=[
         Route("/mcp/sse", endpoint=handle_sse),
         Route("/mcp/messages", endpoint=sse.handle_post_message, methods=["POST"]),
@@ -558,6 +612,8 @@ def _run_http():
         Route("/bootstrap/register-repo", endpoint=handle_bootstrap_register, methods=["POST"]),
         Route("/reviewers/{org}/{repo}", endpoint=handle_reviewers),
         Route("/reviewers", endpoint=handle_reviewers, methods=["POST"]),
+        Route("/reviewers/signup", endpoint=handle_reviewer_signup),
+        Route("/reviewers/signoff", endpoint=handle_reviewer_signoff),
         Route("/health", endpoint=lambda _: PlainTextResponse("ok")),
         Route("/ready", endpoint=handle_ready),
         Route("/debug/config", endpoint=handle_debug_config),

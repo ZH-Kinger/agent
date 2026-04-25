@@ -262,3 +262,92 @@ def notify_reviewers(
             result["errors"] = errors
         return result
     return {"ok": False, "error": f"全部发送失败: {'; '.join(errors)}"}
+
+
+def send_reviewer_signup_card(
+    open_id: str,
+    user_name: str,
+    repo: str,
+    server_url: str,
+    signup_token: str,
+) -> dict:
+    """
+    发送审核人自注册卡片给用户，点击按钮即可加入/退出审核人列表。
+
+    Args:
+        open_id: 飞书用户 open_id
+        user_name: 用户名
+        repo: 仓库名 (org/repo)
+        server_url: 服务器地址
+        signup_token: 注册接口鉴权 token
+    """
+    if not FEISHU_ENABLED:
+        return {"ok": False, "error": "飞书未启用"}
+
+    try:
+        token = _get_tenant_token()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": f"🔔 审核人注册: {repo}"},
+            "template": "blue",
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"**仓库**: {repo}\n"
+                        f"**用户**: {user_name}\n\n"
+                        f"点击下方按钮注册为该仓库的审核人，后续 PR 将自动通知你审批。"
+                    ),
+                },
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "✅ 注册为审核人"},
+                        "type": "primary",
+                        "url": f"{server_url}/reviewers/signup?repo={repo}&open_id={open_id}&name={user_name}&token={signup_token}",
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "❌ 退出审核人"},
+                        "type": "danger",
+                        "url": f"{server_url}/reviewers/signoff?repo={repo}&open_id={open_id}&token={signup_token}",
+                    },
+                ],
+            },
+        ],
+    }
+
+    payload = {
+        "receive_id": open_id,
+        "msg_type": "interactive",
+        "content": __import__("json").dumps(card, ensure_ascii=False),
+    }
+
+    try:
+        resp = httpx.post(
+            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+        data = resp.json()
+        if data.get("code") == 0:
+            return {"ok": True}
+        return {"ok": False, "error": f"发送失败: code={data.get('code')}, msg={data.get('msg')}"}
+    except Exception as e:
+        return {"ok": False, "error": f"请求失败: {e}"}

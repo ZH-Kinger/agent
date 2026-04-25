@@ -1,29 +1,27 @@
-"""Tool: jira integration — 拉取需求详情、自动创建工单、回写 Review 结论（支持单机缓存）"""
+"""Tool: jira integration — 拉取需求详情、自动创建工单、回写 Review 结论（Redis 缓存）"""
 import os
 import re
 import time
 import hashlib
 from config import (
     JIRA_URL, JIRA_PAT, JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN,
-    JIRA_ENABLED, JIRA_CACHE_TTL, JIRA_PROJECT_KEY, JIRA_ISSUE_TYPE
+    JIRA_ENABLED, JIRA_CACHE_TTL, JIRA_PROJECT_KEY, JIRA_ISSUE_TYPE,
+    get_jira_cache, set_jira_cache,
 )
 import httpx
 
 
-# ── 缓存层 ──────────────────────────────────────────────────────────────────
-# 单机内存缓存：K=Jira ID + 时间窗口，V=issue data dict
-jira_cache = {}
+# ── Redis cache (fallback: in-memory) ──────────────────────────────────────
+jira_cache = {}  # fallback when Redis unavailable
+
 
 def _cache_key(issue_id: str) -> str:
-    """带时间窗口的缓存键：JIRA-123 + 5min_ttl_window"""
     window = int(time.time() / JIRA_CACHE_TTL)
     return f"{issue_id}:{window}"
 
+
 def _invalidate_cache():
-    """清理过期缓存（定时任务可调用）"""
-    now = time.time()
     global jira_cache
-    # 简单实现：清空。生产环境可改为写时打 timestamp + 读时判断过期
     jira_cache.clear()
 
 
@@ -56,10 +54,14 @@ def fetch_jira_issue(issue_id: str, force_refresh: bool = False) -> dict:
         return {"ok": False, "error": "未提供 Jira 问题编号"}
 
     if not force_refresh:
+        # Try Redis cache first
+        cached_redis = get_jira_cache(issue_id)
+        if cached_redis:
+            return {"ok": True, "data": cached_redis, "from_cache": True}
+        # Fallback to in-memory cache
         key = _cache_key(issue_id)
         if key in jira_cache:
-            cached = jira_cache[key]
-            return {"ok": True, "data": cached, "from_cache": True}
+            return {"ok": True, "data": jira_cache[key], "from_cache": True}
 
     headers = {
         "Authorization": _get_auth_header(),
@@ -85,7 +87,8 @@ def fetch_jira_issue(issue_id: str, force_refresh: bool = False) -> dict:
             "assignee": fields_dict.get("assignee", {}).get("displayName", "未分配"),
         }
 
-        # 写入缓存
+        # Write to both Redis and in-memory cache
+        set_jira_cache(issue_id, payload)
         cached_key = _cache_key(issue_id)
         jira_cache[cached_key] = payload
 
