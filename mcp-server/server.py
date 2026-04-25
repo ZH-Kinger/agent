@@ -31,6 +31,8 @@ from config import (
     get_repo_token,
     issue_repo_token,
     public_runtime_config,
+    get_repo_reviewers,
+    set_repo_reviewers,
 )
 from tools.validate import validate_release_input
 from tools.changelog import preview_changelog
@@ -233,8 +235,8 @@ def _run_http():
     from starlette.routing import Route
     from mcp.server.sse import SseServerTransport
     from tools.review import pr_review
-    from tools.jira import create_jira_issue, extract_jira_id_from_text
-    from tools.feishu import send_review_card
+    from tools.jira import create_jira_issue, extract_jira_id_from_text, add_jira_comment
+    from tools.feishu import send_review_card, notify_reviewers
     import uvicorn
 
     sse = SseServerTransport("/mcp/messages")
@@ -336,6 +338,39 @@ def _run_http():
             "review_token": review_token,
             "request_id": request_id,
         })
+
+    async def handle_reviewers(request: Request):
+        """GET /reviewers/{org}/{repo} → list reviewers; POST /reviewers → set reviewers"""
+        if request.method == "GET":
+            path_parts = request.url.path.strip("/").split("/")
+            if len(path_parts) < 3:
+                return bad_request("Path: /reviewers/{org}/{repo}")
+            org, repo = path_parts[1], path_parts[2]
+            reviewers = get_repo_reviewers(org, repo)
+            return JSONResponse({"repo": f"{org}/{repo}", "reviewers": reviewers})
+
+        # POST
+        try:
+            data = await request.json()
+        except Exception:
+            return bad_request("Invalid JSON")
+
+        repo_full_name = str(data.get("repo_full_name", "")).strip()
+        if not REPO_SLUG_RE.match(repo_full_name):
+            return bad_request("repo_full_name must be org/repo")
+
+        auth = parse_bearer_token(request.headers.get("authorization", ""))
+        if not BOOTSTRAP_TOKEN or auth != BOOTSTRAP_TOKEN:
+            return unauthorized_response("Invalid bootstrap token")
+
+        reviewers = data.get("reviewers", [])
+        if not isinstance(reviewers, list):
+            return bad_request("reviewers must be a list of {open_id, name}")
+
+        org, repo = repo_full_name.split("/", 1)
+        set_repo_reviewers(org, repo, reviewers)
+        logger.info("reviewers updated repo=%s count=%d", repo_full_name, len(reviewers))
+        return JSONResponse({"ok": True, "repo": repo_full_name, "reviewers": reviewers})
 
     async def handle_review(request: Request):
         request_id = f"review-{int(time.time() * 1000)}"
@@ -465,6 +500,14 @@ def _run_http():
         summary_match = re.search(r"###\s*(整体结论|总体评价|Summary)\s*\n(.+?)(?=\n###|$)", review_text, re.DOTALL)
         review_summary = summary_match.group(2).strip() if summary_match else review_text[:300]
 
+        if jira_id:
+            # Append review summary as Jira comment
+            jira_comment_result = add_jira_comment(jira_id, f"h3. AI Review 摘要\n{review_summary}\n\n---\nPR: {pr_url}")
+            if jira_comment_result.get("ok"):
+                result_log["steps"].append(f"✅ Jira 评论已追加: {jira_id}")
+            else:
+                logger.warning("jira comment failed request_id=%s jira_id=%s error=%s", request_id, jira_id, jira_comment_result.get("error"))
+
         feishu_result = send_review_card(
             pr_title=title,
             pr_url=pr_url,
@@ -479,6 +522,23 @@ def _run_http():
         else:
             result_log["steps"].append(f"⚠️ 飞书通知失败: {feishu_result['error']}")
             logger.warning("feishu notify failed request_id=%s repo=%s pr_number=%s error=%s", request_id, repo, pr_number, feishu_result["error"])
+
+        # Notify reviewers
+        reviewers = get_repo_reviewers(org, repo)
+        if reviewers:
+            reviewer_result = notify_reviewers(
+                pr_title=title,
+                pr_url=pr_url,
+                repo=repo,
+                reviewers=reviewers,
+                jira_issue_id=jira_id,
+                jira_issue_url=jira_url,
+            )
+            if reviewer_result.get("ok"):
+                result_log["steps"].append(f"✅ 审核人已通知 ({reviewer_result['notified']}人)")
+            else:
+                result_log["steps"].append(f"⚠️ 审核人通知失败: {reviewer_result.get('error', '')}")
+                logger.warning("reviewer notify failed request_id=%s error=%s", request_id, reviewer_result.get("error"))
 
         log_request_end("pipeline", request_id, started_at, 200, repo=repo, pr_number=pr_number, has_blocker=has_blocker, auth=auth_mode)
         return JSONResponse({
@@ -496,6 +556,8 @@ def _run_http():
         Route("/review", endpoint=handle_review, methods=["POST"]),
         Route("/pr-pipeline", endpoint=handle_pipeline, methods=["POST"]),
         Route("/bootstrap/register-repo", endpoint=handle_bootstrap_register, methods=["POST"]),
+        Route("/reviewers/{org}/{repo}", endpoint=handle_reviewers),
+        Route("/reviewers", endpoint=handle_reviewers, methods=["POST"]),
         Route("/health", endpoint=lambda _: PlainTextResponse("ok")),
         Route("/ready", endpoint=handle_ready),
         Route("/debug/config", endpoint=handle_debug_config),

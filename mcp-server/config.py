@@ -22,6 +22,7 @@ BOOTSTRAP_TOKEN = os.environ.get("BOOTSTRAP_TOKEN", "")
 LOG_LEVEL      = os.environ.get("LOG_LEVEL", "INFO").upper()
 DEBUG_MODE     = os.environ.get("DEBUG_MODE", "false").lower() == "true"
 REPO_TOKENS_FILE = os.environ.get("REPO_TOKENS_FILE", "")
+REVIEWERS_FILE = os.environ.get("REVIEWERS_FILE", "")
 
 # ── LLM (通过 OpenAI 兼容接口，支持 DashScope / Qwen-Max) ──────────────────
 LLM_MODEL      = os.environ.get("LLM_MODEL", "qwen-max")
@@ -96,6 +97,44 @@ def get_repo_token(org: str, repo: str) -> str:
     return load_repo_tokens().get(f"{org}/{repo}", "")
 
 
+def _reviewers_path() -> Path | None:
+    if not REVIEWERS_FILE:
+        return None
+    return Path(REVIEWERS_FILE)
+
+
+def load_reviewers() -> dict[str, list[dict]]:
+    """Load reviewers config. Format: {"org/repo": [{"open_id": "xxx", "name": "张三"}]}"""
+    path = _reviewers_path()
+    if not path or not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def save_reviewers(reviewers: dict[str, list[dict]]) -> None:
+    path = _reviewers_path()
+    if not path:
+        raise RuntimeError("REVIEWERS_FILE is not configured")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(reviewers, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def get_repo_reviewers(org: str, repo: str) -> list[dict]:
+    return load_reviewers().get(f"{org}/{repo}", [])
+
+
+def set_repo_reviewers(org: str, repo: str, reviewers: list[dict]) -> None:
+    all_reviewers = load_reviewers()
+    all_reviewers[f"{org}/{repo}"] = reviewers
+    save_reviewers(all_reviewers)
+
+
 def public_runtime_config() -> dict:
     repo_tokens_file = _repo_tokens_path()
     return {
@@ -107,6 +146,7 @@ def public_runtime_config() -> dict:
         "bootstrap_token_configured": bool(BOOTSTRAP_TOKEN),
         "repo_tokens_enabled": bool(repo_tokens_file),
         "repo_tokens_file": str(repo_tokens_file) if repo_tokens_file else "",
+        "reviewers_enabled": bool(_reviewers_path()),
         "github_org": GITHUB_ORG,
         "jira_enabled": JIRA_ENABLED,
         "jira_sync_to_jira": JIRA_SYNC_TO_JIRA,

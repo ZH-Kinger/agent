@@ -170,7 +170,16 @@ def create_jira_issue(title: str, body: str, pr_url: str, repo: str = "") -> dic
     clean_title = re.sub(r"^\w+(\(.+?\))?!?:\s*", "", title).strip() or title
     summary = f"[{repo}] {clean_title}" if repo else clean_title
 
-    description = f"自动创建自 PR：{pr_url}\n\n---\n\n{body or '（无描述）'}"
+    description = (
+        f"h3. PR 信息\n"
+        f"*仓库*: {repo}\n"
+        f"*标题*: {title}\n"
+        f"*链接*: {pr_url}\n\n"
+        f"h3. PR 描述\n"
+        f"{body or '（无描述）'}\n\n"
+        f"---\n"
+        f"自动创建自 PR Pipeline"
+    )
 
     headers = {
         "Authorization": _get_auth_header(),
